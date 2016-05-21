@@ -15,24 +15,257 @@
 #endif
 #define CLASSNAME "CLinuxC1Codec"
 
-static int64_t get_pts_video()
+
+/**********************************************/
+
+class PosixFile
 {
-  int fd = open("/sys/class/tsync/pts_video", O_RDONLY);
-  if (fd >= 0)
+public:
+  PosixFile() :
+    m_fd(-1)
   {
-    char pts_str[16];
-    int size = read(fd, pts_str, sizeof(pts_str));
-    close(fd);
-    if (size > 0)
+  }
+
+  PosixFile(int fd) :
+    m_fd(fd)
+  {
+  }
+
+  ~PosixFile()
+  {
+    if (m_fd >= 0)
+     close(m_fd);
+  }
+
+  bool Open(const std::string &pathName, int flags)
+  {
+    m_fd = open(pathName.c_str(), flags);
+    return m_fd >= 0;
+  }
+
+  int GetDescriptor() const { return m_fd; }
+
+  int IOControl(unsigned long request, void *param)
+  {
+    return ioctl(m_fd, request, param);
+  }
+
+  int Poll(int timeout)
+  {
+    struct pollfd p;
+    p.fd = m_fd;
+    p.events = POLLERR | POLLIN;
+
+    return poll(&p, 1, timeout);
+}
+
+
+private:
+  int m_fd;
+};
+
+typedef int ion_handle;
+
+struct ion_allocation_data
+{
+  size_t len;
+  size_t align;
+  unsigned int heap_id_mask;
+  unsigned int flags;
+  ion_handle handle;
+};
+
+struct ion_fd_data
+{
+  ion_handle handle;
+  int fd;
+};
+
+struct ion_handle_data
+{
+  ion_handle handle;
+};
+
+#define ION_IOC_MAGIC 'I'
+
+#define ION_IOC_ALLOC _IOWR(ION_IOC_MAGIC, 0, struct ion_allocation_data)
+#define ION_IOC_FREE  _IOWR(ION_IOC_MAGIC, 1, struct ion_handle_data)
+#define ION_IOC_SHARE _IOWR(ION_IOC_MAGIC, 4, struct ion_fd_data)
+
+enum ion_heap_type
+{
+  ION_HEAP_TYPE_SYSTEM,
+  ION_HEAP_TYPE_SYSTEM_CONTIG,
+  ION_HEAP_TYPE_CARVEOUT,
+  ION_HEAP_TYPE_CHUNK,
+  ION_HEAP_TYPE_CUSTOM,
+  ION_NUM_HEAPS = 16
+};
+
+#define ION_HEAP_SYSTEM_MASK        (1 << ION_HEAP_TYPE_SYSTEM)
+#define ION_HEAP_SYSTEM_CONTIG_MASK (1 << ION_HEAP_TYPE_SYSTEM_CONTIG)
+#define ION_HEAP_CARVEOUT_MASK      (1 << ION_HEAP_TYPE_CARVEOUT)
+
+#undef ALIGN
+#define ALIGN(value, alignment) (((value)+(alignment-1))&~(alignment-1))
+
+class IonBuffer
+{
+public:
+  IonBuffer(PosixFilePtr ionFile) :
+    m_ionFile(ionFile),
+    m_handle(0),
+    m_data(nullptr),
+    m_length(0)
+  {
+  }
+
+  ~IonBuffer()
+  {
+    Free();
+  }
+
+  void *Allocate(size_t len)
+  {
+    if (m_data)
+      Free();
+
+    ion_handle handle = IOControlAlloc(len, 0, ION_HEAP_CARVEOUT_MASK, 0);
+    if (!handle)
+      return nullptr;
+
+    PosixFilePtr shareFile = IOControlShare(handle);
+    if (!shareFile)
     {
-      unsigned long pts = strtoul(pts_str, NULL, 16);
-      debug_log(LOGDEBUG, "%s::%s get_pts_video: %lu", CLASSNAME, __func__, pts);
-      return pts;
+      IOControlFree(handle);
+      return nullptr;
+    }
+
+    void *data = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, shareFile->GetDescriptor(), 0);
+    if (data == MAP_FAILED)
+    {
+      CLog::Log(LOGERROR, "IonBuffer::Allocate - cannot map ION memory (len = %d): %s", len, strerror(errno));
+      IOControlFree(handle);
+      return nullptr;
+    }
+
+    m_handle = handle;
+    m_shareFile = shareFile;
+    m_data = data;
+    m_length = len;
+
+    return m_data;
+  }
+
+  void Free()
+  {
+    if (m_data)
+    {
+      munmap(m_data, m_length);
+      IOControlFree(m_handle);
+      m_shareFile.reset();
+      m_data = nullptr;
+      m_length = 0;
     }
   }
-  CLog::Log(LOGERROR, "%s::%s get_pts_video: open /tsync/event error", CLASSNAME, __func__);
-  return -1;
-}
+
+  void *GetData() const          { return m_data; }
+  size_t GetLength() const       { return m_length; }
+  int GetShareDescriptor() const { return m_shareFile->GetDescriptor(); }
+
+private:
+  ion_handle IOControlAlloc(size_t len, size_t align, unsigned int heapMask, unsigned int flags)
+  {
+    ion_allocation_data data =
+    {
+      .len = len,
+      .align = align,
+      .heap_id_mask = heapMask,
+      .flags = flags
+    };
+
+    if (m_ionFile->IOControl(ION_IOC_ALLOC, &data) < 0)
+    {
+      CLog::Log(LOGERROR, "IonBuffer::IOControlAlloc - ION_IOC_ALLOC failed (len = %d): %s", len, strerror(errno));
+      return 0;
+    }
+
+    return data.handle;
+  }
+
+  int IOControlFree(ion_handle handle)
+  {
+    ion_handle_data data =
+    {
+      .handle = handle
+    };
+
+    return m_ionFile->IOControl(ION_IOC_FREE, &data);
+  }
+
+  PosixFilePtr IOControlShare(ion_handle handle)
+  {
+    ion_fd_data data =
+    {
+      .handle = handle
+    };
+
+    if (m_ionFile->IOControl(ION_IOC_SHARE, &data) < 0)
+    {
+      CLog::Log(LOGERROR, "IonBuffer::IOControlShare - ION_IOC_SHARE failed: %s", strerror(errno));
+      return nullptr;
+    }
+
+    return std::make_shared<PosixFile>(data.fd);
+  }
+
+  PosixFilePtr m_ionFile;
+  PosixFilePtr m_shareFile;
+  ion_handle   m_handle;
+  void         *m_data;
+  size_t       m_length;
+};
+
+class VideoFrame
+{
+public:
+  VideoFrame(PosixFilePtr ionFile, int index) :
+    m_ionBuffer(ionFile),
+    m_index(index),
+    m_width(0),
+    m_height(0),
+    m_stride(0),
+    m_pts(DVD_NOPTS_VALUE)
+  {
+  }
+
+  bool Create(int width, int height)
+  {
+    m_width = width;//ALIGN(width, 32);
+    m_height = height;//ALIGN(height, 16);
+    m_stride = ALIGN(width, 16);
+    size_t len = ALIGN(height, 16) * (ALIGN(width, 32) + ALIGN(m_stride / 2, 16));
+    return m_ionBuffer.Allocate(len);
+  }
+
+  const IonBuffer &GetBuffer() const { return m_ionBuffer; }
+  int GetIndex() const               { return m_index; }
+  int GetWidth() const               { return m_width; }
+  int GetHeight() const              { return m_height; }
+  int GetStride() const              { return m_stride; }
+  double GetPts() const              { return m_pts; }
+  void SetPts(double pts)            { m_pts = pts; }
+
+private:
+  IonBuffer m_ionBuffer;
+  int       m_index;
+  int       m_width;
+  int       m_height;
+  int       m_stride;
+  double    m_pts;
+};
+
+/***********************************************************/
 
 static vformat_t codecid_to_vformat(enum AVCodecID id)
 {
@@ -528,10 +761,20 @@ bool CLinuxC1Codec::OpenDecoder(CDVDStreamInfo &hints) {
   m_start_pts = 0;
   m_hints = hints;
 
-  memzero(am_private->am_pkt);
-  am_private->stream_type      = AM_STREAM_ES;
+  m_lastFrame = nullptr;
+  m_dropState = false;
+
   if (hints.width == 0 || hints.height == 0)
     return false;
+
+  if (!OpenIonVideo(hints))
+  {
+    CLog::Log(LOGERROR, "CLinuxC1Codec::OpenDecoder - cannot open ION video device");
+    return false;
+  }
+
+  memzero(am_private->am_pkt);
+  am_private->stream_type      = AM_STREAM_ES;
   am_private->video_width      = hints.width;
   am_private->video_height     = hints.height;
   am_private->video_codec_id   = hints.codec;
@@ -668,6 +911,7 @@ bool CLinuxC1Codec::OpenDecoder(CDVDStreamInfo &hints) {
   if (ret != CODEC_ERROR_NONE)
   {
     CLog::Log(LOGERROR, "%s::%s codec init failed, ret=0x%x", CLASSNAME, __func__, -ret);
+    CloseIonVideo();
     return false;
   }
 
@@ -685,15 +929,139 @@ bool CLinuxC1Codec::OpenDecoder(CDVDStreamInfo &hints) {
 
   SetSpeed(m_speed);
 
-  SetViewport(hints.width, hints.height);
-  ShowMainVideo(true);
+  return true;
+}
+
+bool CLinuxC1Codec::OpenIonVideo(const CDVDStreamInfo &hints)
+{
+  PosixFilePtr ionFile = std::make_shared<PosixFile>();
+  if (!ionFile->Open("/dev/ion", O_RDWR))
+  {
+    CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - cannot open ION memory management device /dev/ion: %s", strerror(errno));
+    return false;
+  }
+
+  PosixFilePtr ionVideoFile = std::make_shared<PosixFile>();
+  if (!ionVideoFile->Open("/dev/video13", O_RDWR | O_NONBLOCK))
+  {
+    CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - cannot open ION video device /dev/video13: %s", strerror(errno));
+    return false;
+  }
+
+  v4l2_format fmt = { 0 };
+  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  fmt.fmt.pix_mp.width = hints.width;
+  fmt.fmt.pix_mp.height = hints.height;
+  fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+  if (ionVideoFile->IOControl(VIDIOC_S_FMT, &fmt) < 0)
+  {
+    CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - VIDIOC_S_FMT failed: %s", strerror(errno));
+    return false;
+  }
+
+  v4l2_requestbuffers req = { 0 };
+  req.count = 4;
+  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.memory = V4L2_MEMORY_DMABUF;
+  if (ionVideoFile->IOControl(VIDIOC_REQBUFS, &req) < 0)
+  {
+    CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - VIDIOC_REQBUFS failed: %s", strerror(errno));
+    return false;
+  }
+
+  int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (ionVideoFile->IOControl(VIDIOC_STREAMON, &type) < 0)
+  {
+      CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - VIDIOC_STREAMON failed: %s", strerror(errno));
+      return false;
+  }
+
+  m_ionFile = ionFile;
+  m_ionVideoFile = ionVideoFile;
+
+  for (size_t i = 0; i < req.count; ++i)
+  {
+    CLog::Log(LOGNOTICE, "CLinuxC1Codec::OpenIonVideo - creating a video frame (width = %d, height = %d)", hints.width, hints.height);
+    VideoFramePtr videoFrame = std::make_shared<VideoFrame>(ionFile, i);
+    if (!videoFrame->Create(hints.width, hints.height))
+    {
+      CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - cannot create a video frame (width = %d, height = %d)", hints.width, hints.height);
+      CloseIonVideo();
+      return false;
+    }
+
+    m_videoFrames.push_back(videoFrame);
+
+    if (!QueueFrame(videoFrame))
+    {
+      CloseIonVideo();
+      return false;
+    }
+  }
+
+  SysfsUtils::SetString("/sys/class/vfm/map", "rm default");
+  SysfsUtils::SetString("/sys/class/vfm/map", "add default decoder ionvideo");
+
+  SysfsUtils::SetInt("/sys/class/ionvideo/scaling_rate", 100);
 
   return true;
 }
 
-void CLinuxC1Codec::ShowMainVideo(const bool show)
+bool CLinuxC1Codec::QueueFrame(VideoFramePtr frame)
 {
-  SysfsUtils::SetInt("/sys/class/video/disable_video", show ? 0 : 1);
+  v4l2_buffer vbuf = { 0 };
+  vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  vbuf.memory = V4L2_MEMORY_DMABUF;
+  vbuf.index = frame->GetIndex();
+  vbuf.m.fd = frame->GetBuffer().GetShareDescriptor();
+  vbuf.length = frame->GetBuffer().GetLength();
+
+  if (m_ionVideoFile->IOControl(VIDIOC_QBUF, &vbuf) < 0)
+  {
+    CLog::Log(LOGERROR, "CLinuxC1Codec::QueueFrame - VIDIOC_QBUF failed (index = %d, length = %d): %s", vbuf.index, vbuf.length, strerror(errno));
+    return false;
+  }
+
+  return true;
+}
+
+bool CLinuxC1Codec::DequeueFrame(VideoFramePtr &frame)
+{
+  frame = nullptr;
+
+  v4l2_buffer vbuf = { 0 };
+  vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  vbuf.memory = V4L2_MEMORY_DMABUF;
+
+  if (m_ionVideoFile->IOControl(VIDIOC_DQBUF, &vbuf) < 0)
+  {
+    if (errno == EAGAIN)
+      return true;
+    else
+    {
+      CLog::Log(LOGERROR, "CLinuxC1Codec::QueueFrame - VIDIOC_DQBUF failed: %s", strerror(errno));
+      return false;
+    }
+  }
+
+  frame = m_videoFrames[vbuf.index];
+  frame->SetPts((double)vbuf.timestamp.tv_usec/* / PTS_FREQ * DVD_TIME_BASE*/);
+
+  return true;
+}
+
+void CLinuxC1Codec::CloseIonVideo()
+{
+  if (m_ionVideoFile)
+  {
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (m_ionVideoFile->IOControl(VIDIOC_STREAMOFF, &type) < 0)
+      CLog::Log(LOGERROR, "CLinuxC1Codec::CloseIonVideo - VIDIOC_STREAMOFF failed: %s", strerror(errno));
+  }
+
+  m_videoFrames.clear();
+  m_ionFile.reset();
+  m_ionVideoFile.reset();
 }
 
 void CLinuxC1Codec::SetSpeed(int speed)
@@ -764,8 +1132,8 @@ void CLinuxC1Codec::CloseDecoder() {
   am_private->extradata = NULL;
   SysfsUtils::SetInt("/sys/class/tsync/enable", 1);
 
-  SetViewport(0, 0);
-  ShowMainVideo(false);
+  CloseIonVideo();
+
   usleep(500 * 1000);
 }
 
@@ -782,6 +1150,13 @@ double CLinuxC1Codec::GetPlayerPtsSeconds()
 
 int CLinuxC1Codec::Decode(uint8_t *pData, size_t iSize, double dts, double pts) {
   debug_log(LOGDEBUG, "%s::%s", CLASSNAME, __func__);
+
+  if (m_lastFrame)
+  {
+    if (!QueueFrame(m_lastFrame))
+      return VC_ERROR;
+  }
+  m_lastFrame = nullptr;
 
   if (pData)
   {
@@ -841,11 +1216,14 @@ int CLinuxC1Codec::Decode(uint8_t *pData, size_t iSize, double dts, double pts) 
       m_1st_pts = am_private->am_pkt.lastpts;
   }
 
-  int64_t pts_video = 0;
+  //m_ionVideoFile->Poll(1000);
+  if (!DequeueFrame(m_lastFrame))
+    return VC_ERROR;
+
   int rtn = VC_BUFFER;
-  pts_video = get_pts_video();
-  if (pts_video != m_cur_pts) {
-    m_cur_pts = pts_video;
+
+  if (m_lastFrame)
+  {
     m_cur_pictcnt++;
     m_old_pictcnt++;
     rtn |= VC_PICTURE;
@@ -885,28 +1263,3 @@ void CLinuxC1Codec::Reset() {
   SetSpeed(m_speed);
 }
 
-void CLinuxC1Codec::SetViewport(int width, int height) {
-
-  if (m_hints.aspect > 0.0 && (((int)lrint(height * m_hints.aspect)) & -3) > width)
-    width = ((int)lrint(height * m_hints.aspect)) & -3;
-
-  char setting[256] = {};
-  double scale;
-  int displayWidth = CDisplaySettings::GetInstance().GetCurrentResolutionInfo().iWidth;
-  int displayHeight = CDisplaySettings::GetInstance().GetCurrentResolutionInfo().iHeight;
-  int cutWidth;
-  int cutHeight;
-
-  if (width > 0 && height > 0) {
-    scale = fmin((double)displayWidth / (double)width, (double)displayHeight / (double)height);
-    cutWidth = (displayWidth - (int)((double)width * scale)) / 2;
-    cutHeight = (displayHeight - (int)((double)height * scale)) / 2;
-    sprintf(setting, "%d %d %d %d", 0 + cutWidth, 0 + cutHeight, displayWidth - cutWidth, displayHeight - cutHeight);
-  } else {
-    sprintf(setting, "%d %d %d %d", 0, 0, 0, 0);
-  }
-
-  CLog::Log(LOGDEBUG, "%s::%s Setting viewport to %s", CLASSNAME, __func__, setting);
-  SysfsUtils::SetString("/sys/class/video/axis", setting);
-  SysfsUtils::SetInt("/sys/class/video/screen_mode", 1);
-}

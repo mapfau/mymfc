@@ -4,6 +4,7 @@
 #include <string>
 #include <math.h>
 #include <poll.h>
+#include <memory>
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +32,14 @@ extern "C" {
 #else
   #include "xbmcstubs.h"
 #endif
+
+#include <linux/videodev2.h>
+
+class PosixFile;
+typedef std::shared_ptr<PosixFile> PosixFilePtr;
+
+class VideoFrame;
+typedef std::shared_ptr<VideoFrame> VideoFramePtr;
 
 #define memzero(x) memset(&(x), 0, sizeof (x))
 
@@ -149,8 +158,19 @@ public:
   bool             GetPicture(DVDVideoPicture *pDvdVideoPicture);
   void             Reset();
   void             SetSpeed(int speed);
+  int              GetBufferLevel();
+  void             SetDropState(bool bDrop);
 
 private:
+  double           GetPlayerPtsSeconds();
+
+  bool          OpenIonVideo(const CDVDStreamInfo &hints);
+  bool          QueueFrame(VideoFramePtr frame);
+  bool          DequeueFrame(VideoFramePtr &frame);
+  bool          StartStreaming();
+  bool          StopStreaming();
+  void          CloseIonVideo();
+
   volatile int     m_speed;
   CDVDStreamInfo   m_hints;
   am_private_t    *am_private;
@@ -161,7 +181,9 @@ private:
   int64_t          m_start_dts;
   int64_t          m_start_pts;
 
-  void             SetViewport(int width, int height);
-  double           GetPlayerPtsSeconds();
-  void             ShowMainVideo(const bool show);
+  PosixFilePtr               m_ionFile;
+  PosixFilePtr               m_ionVideoFile;
+  std::vector<VideoFramePtr> m_videoFrames;
+  VideoFramePtr              m_lastFrame;
+  bool                       m_dropState;
 };
