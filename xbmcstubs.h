@@ -81,6 +81,7 @@ struct DVDVideoPicture
   unsigned int color_primaries;
   unsigned int color_transfer;
   unsigned int extended_format;
+  unsigned int iIndex;
   char         stereo_mode[32];
 
   int8_t* qp_table; // Quantization parameters, primarily used by filters

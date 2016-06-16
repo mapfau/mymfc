@@ -1095,23 +1095,16 @@ bool CLinuxC1Codec::GetPicture(DVDVideoPicture *pDvdVideoPicture)
   debug_log(LOGDEBUG, "%s::%s", CLASSNAME, __func__);
 
   pDvdVideoPicture->iDuration = (double)(am_private->video_rate * DVD_TIME_BASE) / UNIT_FREQ;
-
+  pDvdVideoPicture->pts = frame->GetPts();
   pDvdVideoPicture->dts = DVD_NOPTS_VALUE;
-  if (m_speed == DVD_PLAYSPEED_NORMAL)
-  {
-    pDvdVideoPicture->pts = GetPlayerPtsSeconds() * (double)DVD_TIME_BASE;
-    // video pts cannot be late or dvdplayer goes nuts,
-    // so run it one frame ahead
-    pDvdVideoPicture->pts += 1 * pDvdVideoPicture->iDuration;
-  }
-  else
-  {
-    // We are FF/RW; Do not use the Player clock or it just doesn't work
-    if (m_cur_pts == 0)
-      pDvdVideoPicture->pts = (double)m_1st_pts / PTS_FREQ * DVD_TIME_BASE;
-    else
-      pDvdVideoPicture->pts = (double)m_cur_pts / PTS_FREQ * DVD_TIME_BASE;
-  }
+    
+  pDvdVideoPicture->data[0] = (uint8t*)frame->GetBuffer()->GetShareDescriptor();
+  pDvdVideoPicture->iLineSize[0] = (ALIGN(frame->GetWidth(), 32) * 4;
+  pDvdVideoPicture->iIndex = frame->GetIndex();
+  pDvdVideoPicture->iWidth = frame->GetWidth();
+  pDvdVideoPicture->iHeight = frame->GetHeight();
+  pDvdVideoPicture->iDisplayWidth = pDvdVideoPicture->iWidth;
+  pDvdVideoPicture->iDisplayHeight = pDvdVideoPicture->iHeight;
 
   return true;
 }

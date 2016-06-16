@@ -1,6 +1,17 @@
 #include "system.h"
 #include "main.h"
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+
+#define EGL_EGLEXT_PROTOTYPES 1
+#include <EGL/eglext.h>
+
+#define GL_GLEXT_PROTOTYPES 1
+#include <GLES2/gl2ext.h>
+
+#include <drm/drm_fourcc.h>
+
 #ifdef CLASSNAME
 #undef CLASSNAME
 #endif
@@ -23,6 +34,266 @@ void intHandler(int dummy=0) {
   Cleanup();
   exit(0);
 }
+
+/************************** EGL ****************************/
+
+void GL_CheckError()
+{
+  int error = glGetError();
+
+  if (error != GL_NO_ERROR)
+  {
+    printf("eglGetError(): %i (0x%.4x)\n", (int)error, (int)error);
+    exit(1);
+  }
+}
+
+const char* vertexSource = "\n \
+attribute mediump vec4 Attr_Position;\n \
+attribute mediump vec2 Attr_TexCoord0;\n \
+\n \
+uniform mat4 WorldViewProjection;\n \
+\n \
+varying mediump vec2 TexCoord0;\n \
+\n \
+void main()\n \
+{\n \
+\n \
+  gl_Position = Attr_Position * WorldViewProjection;\n \
+  TexCoord0 = Attr_TexCoord0;\n \
+}\n \
+\n \
+ ";
+
+const char* fragmentSource = "\n \
+uniform lowp sampler2D DiffuseMap;\n \
+\n \
+varying mediump vec2 TexCoord0;\n \
+\n \
+void main()\n \
+{\n \
+  mediump vec4 rgba = texture2D(DiffuseMap, TexCoord0);\n \
+\n \
+  gl_FragColor = rgba;\n \
+}\n \
+\n \
+";
+
+const float quad[] =
+{
+  -1,  1, 0,
+  -1, -1, 0,
+  1, -1, 0,
+
+  1, -1, 0,
+  1,  1, 0,
+  -1,  1, 0
+};
+
+const float quadUV[] =
+{
+  0, 0,
+  0, 1,
+  1, 1,
+
+  1, 1,
+  1, 0,
+  0, 0
+};
+
+EGLDisplay display;
+
+void initGL()
+{
+    EGLint major, minor;
+
+    display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+
+    if (!eglInitialize(display, &major, &minor)) {
+        printf("failed to initialize %d\n",eglGetError());
+        exit(1);
+    } else
+        puts(eglQueryString(display,EGL_EXTENSIONS));
+
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+        printf("failed to bind api EGL_OPENGL_ES_API\n");
+        exit(1);
+    }
+
+  // Shader
+  GLuint vertexShader = 0;
+  GLuint fragmentShader = 0;
+
+  for (int i = 0; i < 2; ++i)
+  {
+    GLuint shaderType;
+    const char* sourceCode;
+
+    if (i == 0)
+    {
+      shaderType = GL_VERTEX_SHADER;
+      sourceCode = vertexSource;
+    }
+    else
+    {
+      shaderType = GL_FRAGMENT_SHADER;
+      sourceCode = fragmentSource;
+    }
+
+    GLuint openGLShaderID = glCreateShader(shaderType);
+    GL_CheckError();
+
+    const char* glSrcCode[1] = { sourceCode };
+    const int lengths[1] = { -1 }; // Tell OpenGL the string is NULL terminated
+
+    glShaderSource(openGLShaderID, 1, glSrcCode, lengths);
+    GL_CheckError();
+
+    glCompileShader(openGLShaderID);
+    GL_CheckError();
+
+    GLint param;
+
+    glGetShaderiv(openGLShaderID, GL_COMPILE_STATUS, &param);
+    GL_CheckError();
+
+    if (param == GL_FALSE)
+    {
+      puts("Shader Compilation Failed.");
+      exit(-1);
+    }
+
+    if (i == 0)
+    {
+      vertexShader = openGLShaderID;
+    }
+    else
+    {
+      fragmentShader = openGLShaderID;
+    }
+  }
+
+  // Program
+  GLuint openGLProgramID = glCreateProgram();
+  GL_CheckError();
+
+  glAttachShader(openGLProgramID, vertexShader);
+  GL_CheckError();
+
+  glAttachShader(openGLProgramID, fragmentShader);
+  GL_CheckError();
+
+
+  // Bind
+  glEnableVertexAttribArray(0);
+  GL_CheckError();
+
+  glBindAttribLocation(openGLProgramID, 0, "Attr_Position");
+  GL_CheckError();
+
+  glEnableVertexAttribArray(1);
+  GL_CheckError();
+
+  glBindAttribLocation(openGLProgramID, 1, "Attr_TexCoord0");
+  GL_CheckError();
+
+  glLinkProgram(openGLProgramID);
+  GL_CheckError();
+
+  glUseProgram(openGLProgramID);
+  GL_CheckError();
+
+  // Get program uniform(s)
+  GLuint wvpUniformLocation = glGetUniformLocation(openGLProgramID, "WorldViewProjection");
+  GL_CheckError();
+
+  if (wvpUniformLocation < 0)
+  {
+    printf("wvpUniformLocation failed");
+    exit(-1);
+  }
+
+  // Set the matrix
+  static float m[16]={1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0, 0.0,0.0,0.0,1.0};
+  glUniformMatrix4fv(wvpUniformLocation, 1, GL_FALSE, m);
+  GL_CheckError();
+
+  // Setup OpenGL
+  //glClearColor(1, 0, 0, 1); // RED for diagnostic use
+  glClearColor(0, 0, 0, 0);   // Transparent Black
+  GL_CheckError();
+
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  GL_CheckError();
+
+  glEnable(GL_CULL_FACE);
+  GL_CheckError();
+
+  glCullFace(GL_BACK);
+  GL_CheckError();
+
+  glFrontFace(GL_CCW);
+  GL_CheckError();
+}
+
+void EnableTexture(DVDVideoPicture *picture)
+{
+  static GLuint textures[8]={0,0,0,0,0,0,0,0};
+
+  if(!textures[picture->iIndex])
+  {
+    EGLint img_attrs[] = {
+      EGL_WIDTH, picture->iWidth,
+      EGL_HEIGHT, picture->iHeight,
+      EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_RGBA8888,
+      EGL_DMA_BUF_PLANE0_FD_EXT, (EGLint)picture->data[0],
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+      EGL_DMA_BUF_PLANE0_PITCH_EXT, picture->iLineSize[0],
+      EGL_NONE
+    };
+
+    EGLImageKHR image = eglCreateImageKHR(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, 0, img_attrs);
+    GL_CheckError();
+
+    glGenTextures(1, &textures[picture->iIndex]);
+    GL_CheckError();
+
+    glActiveTexture(GL_TEXTURE0);
+    GL_CheckError();
+
+    glBindTexture(GL_TEXTURE_2D, textures[picture->iIndex]);
+    GL_CheckError();
+
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL_CheckError();
+
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GL_CheckError();
+
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+    GL_CheckError();
+  }
+  // Upload texture data
+  glActiveTexture(GL_TEXTURE0);
+  GL_CheckError();
+
+  glBindTexture(GL_TEXTURE_2D, textures[picture->iIndex]);
+  GL_CheckError();
+
+  // Set the quad vertex data
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * 4, quad);
+  GL_CheckError();
+
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 2 * 4, quadUV);
+  GL_CheckError();
+
+
+  // Draw
+  glDrawArrays(GL_TRIANGLES, 0, 3 * 2);
+  GL_CheckError();
+}
+
+/************************** EGL ****************************/
 
 int main(int argc, char** argv) {
   m_cVideoCodec = NULL;
