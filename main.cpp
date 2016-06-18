@@ -1,7 +1,7 @@
 #include "system.h"
 #include "main.h"
 
-#include <EGL/egl.h>
+#include "egl.h"
 #include <GLES2/gl2.h>
 
 #define EGL_EGLEXT_PROTOTYPES 1
@@ -102,23 +102,17 @@ const float quadUV[] =
 };
 
 EGLDisplay display;
+EGLSurface surface;
+
 
 void initGL()
 {
-    EGLint major, minor;
+  display = Egl_Initialize();
 
-    display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  EGLConfig config;
+  surface = Egl_CreateWindow(display, &config);
 
-    if (!eglInitialize(display, &major, &minor)) {
-        printf("failed to initialize %d\n",eglGetError());
-        exit(1);
-    } else
-        puts(eglQueryString(display,EGL_EXTENSIONS));
-
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
-        printf("failed to bind api EGL_OPENGL_ES_API\n");
-        exit(1);
-    }
+  EGLContext context = Egl_CreateContext(display, surface, config);
 
   // Shader
   GLuint vertexShader = 0;
@@ -214,13 +208,13 @@ void initGL()
   }
 
   // Set the matrix
-  static float m[16]={1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0, 0.0,0.0,0.0,1.0};
+  static float m[16]={1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0};
   glUniformMatrix4fv(wvpUniformLocation, 1, GL_FALSE, m);
   GL_CheckError();
 
   // Setup OpenGL
-  //glClearColor(1, 0, 0, 1); // RED for diagnostic use
-  glClearColor(0, 0, 0, 0);   // Transparent Black
+  glClearColor(1, 0, 0, 1); // RED for diagnostic use
+  //glClearColor(0, 0, 0, 0);   // Transparent Black
   GL_CheckError();
 
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -243,10 +237,10 @@ void EnableTexture(DVDVideoPicture *picture)
   if(!textures[picture->iIndex])
   {
     EGLint img_attrs[] = {
-      EGL_WIDTH, picture->iWidth,
-      EGL_HEIGHT, picture->iHeight,
+      EGL_WIDTH, (EGLint)picture->iWidth,
+      EGL_HEIGHT, (EGLint)picture->iHeight,
       EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_RGBA8888,
-      EGL_DMA_BUF_PLANE0_FD_EXT, (EGLint)picture->data[0],
+      EGL_DMA_BUF_PLANE0_FD_EXT, (EGLint)reinterpret_cast<long>(picture->data[0]),
       EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
       EGL_DMA_BUF_PLANE0_PITCH_EXT, picture->iLineSize[0],
       EGL_NONE
@@ -287,9 +281,15 @@ void EnableTexture(DVDVideoPicture *picture)
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 2 * 4, quadUV);
   GL_CheckError();
 
+  glClear(GL_COLOR_BUFFER_BIT |
+    GL_DEPTH_BUFFER_BIT |
+    GL_STENCIL_BUFFER_BIT);
 
   // Draw
   glDrawArrays(GL_TRIANGLES, 0, 3 * 2);
+  GL_CheckError();
+
+  eglSwapBuffers(display, surface);
   GL_CheckError();
 }
 
@@ -376,6 +376,8 @@ int main(int argc, char** argv) {
 
   CLog::Log(LOGNOTICE, "%s::%s - ===START===", CLASSNAME, __func__);
 
+  initGL();
+
   // MAIN LOOP
 
   int frameNumber = 0;
@@ -401,10 +403,13 @@ int main(int argc, char** argv) {
 
     ret = m_cVideoCodec->Decode(packet.data, packet.size, packet.pts, packet.dts);
     if (ret & VC_PICTURE)
+    {
       m_cVideoCodec->GetPicture(m_pDvdVideoPicture);
+      //EnableTexture(m_pDvdVideoPicture);
+    }
 
     av_packet_unref(&packet);
-    usleep(1000*17);
+    usleep(1000*10);
   }
 
   CLog::Log(LOGNOTICE, "%s::%s - ===STOP===", CLASSNAME, __func__);

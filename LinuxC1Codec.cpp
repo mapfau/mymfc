@@ -244,7 +244,7 @@ public:
     m_width = width;//ALIGN(width, 32);
     m_height = height;//ALIGN(height, 16);
     m_stride = ALIGN(width, 16);
-    size_t len = ALIGN(height, 16) * (ALIGN(width, 32) + ALIGN(m_stride / 2, 16));
+    size_t len = ALIGN(height, 16) * (ALIGN(width, 32)) *4; //+ ALIGN(m_stride / 2, 16));
     return m_ionBuffer.Allocate(len);
   }
 
@@ -952,7 +952,7 @@ bool CLinuxC1Codec::OpenIonVideo(const CDVDStreamInfo &hints)
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.fmt.pix_mp.width = hints.width;
   fmt.fmt.pix_mp.height = hints.height;
-  fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+  fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_RGB32;
   if (ionVideoFile->IOControl(VIDIOC_S_FMT, &fmt) < 0)
   {
     CLog::Log(LOGERROR, "CLinuxC1Codec::OpenIonVideo - VIDIOC_S_FMT failed: %s", strerror(errno));
@@ -1095,14 +1095,14 @@ bool CLinuxC1Codec::GetPicture(DVDVideoPicture *pDvdVideoPicture)
   debug_log(LOGDEBUG, "%s::%s", CLASSNAME, __func__);
 
   pDvdVideoPicture->iDuration = (double)(am_private->video_rate * DVD_TIME_BASE) / UNIT_FREQ;
-  pDvdVideoPicture->pts = frame->GetPts();
+  pDvdVideoPicture->pts = m_lastFrame->GetPts();
   pDvdVideoPicture->dts = DVD_NOPTS_VALUE;
-    
-  pDvdVideoPicture->data[0] = (uint8t*)frame->GetBuffer()->GetShareDescriptor();
-  pDvdVideoPicture->iLineSize[0] = (ALIGN(frame->GetWidth(), 32) * 4;
-  pDvdVideoPicture->iIndex = frame->GetIndex();
-  pDvdVideoPicture->iWidth = frame->GetWidth();
-  pDvdVideoPicture->iHeight = frame->GetHeight();
+
+  pDvdVideoPicture->data[0] = (uint8_t*)m_lastFrame->GetBuffer().GetShareDescriptor();
+  pDvdVideoPicture->iLineSize[0] = (ALIGN(m_lastFrame->GetWidth(), 32)) * 4;
+  pDvdVideoPicture->iIndex = m_lastFrame->GetIndex();
+  pDvdVideoPicture->iWidth = m_lastFrame->GetWidth();
+  pDvdVideoPicture->iHeight = m_lastFrame->GetHeight();
   pDvdVideoPicture->iDisplayWidth = pDvdVideoPicture->iWidth;
   pDvdVideoPicture->iDisplayHeight = pDvdVideoPicture->iHeight;
 
@@ -1219,6 +1219,7 @@ int CLinuxC1Codec::Decode(uint8_t *pData, size_t iSize, double dts, double pts) 
   {
     m_cur_pictcnt++;
     m_old_pictcnt++;
+    m_cur_pts = m_lastFrame->GetPts();
     rtn |= VC_PICTURE;
   }
 

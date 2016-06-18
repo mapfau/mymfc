@@ -9,8 +9,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-  #include <amcodec/codec.h>
-  #include <amcodec/codec_type.h>
+  #include <codec.h>
+  #include <codec_type.h>
 #ifdef __cplusplus
 }
 #endif
